@@ -21,6 +21,41 @@ const COLORS = {
   border: "#E8E4DE",
 };
 
+const SEEN_IDS_KEY = "seenInvitationIds";
+const REMINDER_COUNTER_KEY = "cardsSinceReminder";
+
+function readSeenIds(): Set<string> {
+  if (typeof window === "undefined") return new Set();
+  try {
+    const raw = sessionStorage.getItem(SEEN_IDS_KEY);
+    return raw ? new Set(JSON.parse(raw) as string[]) : new Set();
+  } catch {
+    return new Set();
+  }
+}
+
+function recordShown(id: string, totalEligible: number) {
+  if (typeof window === "undefined") return;
+  const seen = readSeenIds();
+  seen.add(id);
+  // Cap the history so we never block forever; keep ~60% of the catalog
+  const cap = Math.max(20, Math.floor(totalEligible * 0.6));
+  let arr = Array.from(seen);
+  if (arr.length > cap) arr = arr.slice(arr.length - cap);
+  sessionStorage.setItem(SEEN_IDS_KEY, JSON.stringify(arr));
+}
+
+function readReminderCounter(): number {
+  if (typeof window === "undefined") return 0;
+  const raw = sessionStorage.getItem(REMINDER_COUNTER_KEY);
+  return raw ? parseInt(raw, 10) || 0 : 0;
+}
+
+function writeReminderCounter(n: number) {
+  if (typeof window === "undefined") return;
+  sessionStorage.setItem(REMINDER_COUNTER_KEY, String(n));
+}
+
 export default function Home() {
   const [experiences, setExperiences] = useState<Experience[]>([]);
   const [statuses, setStatuses] = useState<ExperienceStatus[]>([]);
@@ -75,11 +110,22 @@ export default function Home() {
         }
       }
 
-      // Pick a new card
-      const next = getNextInvitation(exps, sts, us, cc);
+      // Pick a new card, respecting session history
+      const seenIds = readSeenIds();
+      const cardsSinceReminder = readReminderCounter();
+      const next = getNextInvitation(exps, sts, us, cc, {
+        excludeIds: seenIds,
+        savedReminderAllowed: cardsSinceReminder >= 4,
+      });
       setCurrentCard(next);
       if (next) {
         sessionStorage.setItem("currentInvitationId", next.experience.id);
+        recordShown(next.experience.id, exps.length);
+        if (next.isSavedReminder) {
+          writeReminderCounter(0);
+        } else {
+          writeReminderCounter(cardsSinceReminder + 1);
+        }
       } else {
         sessionStorage.removeItem("currentInvitationId");
       }
@@ -146,7 +192,10 @@ export default function Home() {
       const updated = await updateFilters(filters as Parameters<typeof updateFilters>[0]);
       setUserState(updated);
       // Filters changed — pick a new card matching new criteria
-      const next = getNextInvitation(experiences, statuses, updated, categoryCounts);
+      const next = getNextInvitation(experiences, statuses, updated, categoryCounts, {
+        excludeIds: readSeenIds(),
+        savedReminderAllowed: readReminderCounter() >= 4,
+      });
       setCurrentCard(next);
       if (next) {
         sessionStorage.setItem("currentInvitationId", next.experience.id);

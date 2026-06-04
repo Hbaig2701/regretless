@@ -34,8 +34,14 @@ export function getNextInvitation(
   experiences: Experience[],
   statuses: ExperienceStatus[],
   userState: UserState,
-  categoryCounts: Record<number, number>
+  categoryCounts: Record<number, number>,
+  options: {
+    excludeIds?: Set<string>;
+    savedReminderAllowed?: boolean;
+  } = {}
 ): { experience: Experience; isSavedReminder: boolean } | null {
+  const excludeIds = options.excludeIds ?? new Set<string>();
+  const savedReminderAllowed = options.savedReminderAllowed ?? true;
   // Build lookup maps
   const statusByExpId = new Map<string, string>();
   statuses.forEach((s) => statusByExpId.set(s.experience_id, s.status));
@@ -95,34 +101,54 @@ export function getNextInvitation(
 
   if (eligible.length === 0) return null;
 
-  // 4. 20% chance to surface a saved experience
-  const savedExperiences = eligible.filter(
-    (exp) => statusByExpId.get(exp.id) === "saved"
+  // 4. Pool partitioning by status, respecting session exclusions
+  const partition = (arr: Experience[]) => ({
+    unseen: arr.filter((e) => !excludeIds.has(e.id)),
+    seen: arr.filter((e) => excludeIds.has(e.id)),
+  });
+
+  const fresh = partition(
+    eligible.filter((e) => !statusByExpId.has(e.id))
   );
-  const unsavedExperiences = eligible.filter(
-    (exp) => statusByExpId.get(exp.id) !== "saved"
+  const saved = partition(
+    eligible.filter((e) => statusByExpId.get(e.id) === "saved")
+  );
+  const skipped = partition(
+    eligible.filter((e) => statusByExpId.get(e.id) === "skipped")
   );
 
-  if (savedExperiences.length > 0 && Math.random() < 0.2) {
-    const idx = Math.floor(Math.random() * savedExperiences.length);
-    return { experience: savedExperiences[idx], isSavedReminder: true };
+  // 5. Saved reminder branch — only if not recently shown
+  if (savedReminderAllowed && saved.unseen.length > 0 && Math.random() < 0.2) {
+    const idx = Math.floor(Math.random() * saved.unseen.length);
+    return { experience: saved.unseen[idx], isSavedReminder: true };
   }
 
-  // Use unsaved pool if available, otherwise fall back to saved
-  const pool = unsavedExperiences.length > 0 ? unsavedExperiences : savedExperiences;
+  // 6. Primary pool cascade: fresh > skipped (unseen) > saved (unseen) > recycle anything
+  let pool: Experience[];
+  if (fresh.unseen.length > 0) {
+    pool = fresh.unseen;
+  } else if (skipped.unseen.length > 0) {
+    pool = skipped.unseen;
+  } else if (saved.unseen.length > 0) {
+    pool = saved.unseen;
+  } else {
+    // Everything in eligible has been shown this session — recycle, prefer non-saved
+    const recyclable = [...fresh.seen, ...skipped.seen];
+    pool = recyclable.length > 0 ? recyclable : saved.seen;
+  }
 
-  // 5. Category balancing — weight toward underrepresented categories
+  if (pool.length === 0) return null;
+
+  // 7. Category balancing — weight toward underrepresented categories
   const maxCount = Math.max(...Object.values(categoryCounts), 1);
   const weights = pool.map((exp) => {
     const catCount = categoryCounts[exp.category_id] || 0;
-    // Empty categories get 3x weight, max category gets 1x
     const weight = catCount === 0 ? 3 : Math.max(1, 3 - (catCount / maxCount) * 2);
-    // Skipped experiences get lower priority
     if (statusByExpId.get(exp.id) === "skipped") return weight * 0.5;
     return weight;
   });
 
-  // 6. Weighted random selection
+  // 8. Weighted random selection
   const totalWeight = weights.reduce((sum, w) => sum + w, 0);
   let random = Math.random() * totalWeight;
 
@@ -136,6 +162,5 @@ export function getNextInvitation(
     }
   }
 
-  // Fallback
   return { experience: pool[0], isSavedReminder: false };
 }
